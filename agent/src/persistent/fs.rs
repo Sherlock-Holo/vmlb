@@ -52,7 +52,7 @@ impl Persistent for FsPersistent {
 
         info!(namespace, service, "read record content done");
 
-        match serde_yaml::from_slice(&content) {
+        match serde_json::from_slice(&content) {
             Err(err) => {
                 error!(%err, "unmarshal record failed");
 
@@ -118,7 +118,7 @@ impl Persistent for FsPersistent {
                             .await
                             .tap_err(|err| error!(%err, ?path, "read reocrd content failed"))?;
 
-                        match serde_yaml::from_slice::<Record>(&content) {
+                        match serde_json::from_slice::<Record>(&content) {
                             Err(err) => {
                                 error!(%err, ?path, "unmarshal record failed");
 
@@ -146,7 +146,7 @@ impl Persistent for FsPersistent {
         service: &str,
         record: Record,
     ) -> Result<(), Self::Error> {
-        let content = match serde_yaml::to_string(&record) {
+        let content = match serde_json::to_string(&record) {
             Err(err) => {
                 error!(%err, "marshal record failed");
 
@@ -243,7 +243,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(content).unwrap(),
-            "forwards:\n- endpoints:\n  - 1.1.1.1\n  port: 80\n  protocol: TCP\n  backends:\n  - 127.0.0.1:80\n"
+            r#"{"forwards":[{"endpoints":["1.1.1.1"],"port":80,"protocol":"TCP","backends":["127.0.0.1:80"]}]}"#,
         );
     }
 
@@ -262,7 +262,7 @@ mod tests {
 
         fs::write(
             path,
-            "forwards:\n- endpoints:\n  - 1.1.1.1\n  port: 80\n  protocol: TCP\n  backends:\n  - 127.0.0.1:80\n",
+            r#"{"forwards":[{"endpoints":["1.1.1.1"],"port":80,"protocol":"TCP","backends":["127.0.0.1:80"]}]}"#,
         )
             .await
             .unwrap();
@@ -301,7 +301,7 @@ mod tests {
 
         fs::write(
             path,
-            "forwards:\n- endpoints:\n  - 1.1.1.1\n  port: 80\n  protocol: TCP\n  backends:\n  - 127.0.0.1:80\n",
+            r#"{"forwards":[{"endpoints":["1.1.1.1"],"port":80,"protocol":"TCP","backends":["127.0.0.1:80"]}]}"#,
         )
             .await
             .unwrap();

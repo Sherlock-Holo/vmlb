@@ -28,9 +28,11 @@ tap = "1"
 tracing = "0.1"
 
 serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
+serde_json = "1"
 
 rtnetlink = "0.11"
+
+clap = { version = "3", features = ["derive"] }
 
 [dev-dependencies]
 mockall = "0.11"

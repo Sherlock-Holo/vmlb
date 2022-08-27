@@ -53,7 +53,8 @@ impl<Al, Pe, Pr> Api<Al, Pe, Pr> {
         }
 
         for forward in req.forwards.iter() {
-            if forward.protocol != Protocol::Tcp as _ && forward.protocol != Protocol::Udp as _ {
+            if forward.protocol != Protocol::Tcp as i32 && forward.protocol != Protocol::Udp as i32
+            {
                 error!(protocol = forward.protocol, "invalid protocol");
 
                 return Err(Status::invalid_argument(format!(
@@ -219,9 +220,9 @@ where
             .forwards
             .into_iter()
             .map(|forward| {
-                let protocol = if forward.protocol == Protocol::Tcp as _ {
+                let protocol = if forward.protocol == Protocol::Tcp as i32 {
                     Network::TCP
-                } else if forward.protocol == Protocol::Udp as _ {
+                } else if forward.protocol == Protocol::Udp as i32 {
                     Network::UDP
                 } else {
                     unreachable!()
