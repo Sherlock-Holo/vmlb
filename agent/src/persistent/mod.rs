@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::error;
 use std::net::SocketAddr;
 
+pub use fs::FsPersistent;
 use serde::{Deserialize, Serialize};
 
 use crate::Network;

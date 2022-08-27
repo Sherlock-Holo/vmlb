@@ -14,7 +14,7 @@ use crate::api::pb::Protocol;
 use crate::persistent::{Forward, Persistent, Record};
 use crate::proxy::{Network, Proxy};
 
-mod pb {
+pub mod pb {
     tonic::include_proto!("vmlb.agent");
 }
 

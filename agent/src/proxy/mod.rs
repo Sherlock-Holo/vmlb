@@ -2,8 +2,9 @@ use std::io;
 use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
+pub use userspace::UserspaceProxy;
 
-pub mod userspace;
+mod userspace;
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]

@@ -1,5 +1,7 @@
 use std::error;
 
+pub use veth::VethAddrAllocate;
+
 mod veth;
 
 #[cfg_attr(test, mockall::automock(type Error = std::io::Error;))]
