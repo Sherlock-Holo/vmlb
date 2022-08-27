@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package vmlb.agent;
+
+message Backend {
+  // ipv4 or ipv6
+  string addr = 1;
+
+  // port
+  uint32 target_port = 2;
+}
+
+enum Protocol {
+  TCP = 0;
+  UDP = 1;
+}
+
+message Forward {
+  // only support TCP or UDP for now
+  Protocol protocol = 1;
+
+  // incoming port
+  uint32 port = 2;
+
+  repeated Backend backends = 3;
+}
+
+message AddServiceRequest {
+  string namespace = 1;
+  string service = 2;
+
+  repeated Forward forwards = 3;
+}
+
+message AddServiceResponse {}
+
+message DeleteServiceRequest {
+  string namespace = 1;
+  string service = 2;
+}
+
+message DeleteServiceResponse {}
+
+service Agent {
+  // refresh all services
+  rpc RefreshServices(stream AddServiceRequest) returns (AddServiceResponse) {}
+
+  // add or update service
+  rpc AddService(AddServiceRequest) returns (AddServiceResponse) {}
+
+  // delete service
+  rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse) {}
+}
