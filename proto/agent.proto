@@ -32,7 +32,9 @@ message AddServiceRequest {
   repeated Forward forwards = 3;
 }
 
-message AddServiceResponse {}
+message AddServiceResponse {
+  repeated string addr = 1;
+}
 
 message DeleteServiceRequest {
   string namespace = 1;
@@ -43,7 +45,7 @@ message DeleteServiceResponse {}
 
 service Agent {
   // refresh all services
-  rpc RefreshServices(stream AddServiceRequest) returns (AddServiceResponse) {}
+  rpc RefreshServices(stream AddServiceRequest) returns (stream AddServiceResponse) {}
 
   // add or update service
   rpc AddService(AddServiceRequest) returns (AddServiceResponse) {}

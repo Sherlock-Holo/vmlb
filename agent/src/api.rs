@@ -1,8 +1,12 @@
+use std::error::Error;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use std::sync::Arc;
 
-use futures_util::{Stream, TryStreamExt};
+use futures_channel::mpsc;
+use futures_channel::mpsc::Receiver;
+use futures_util::{Sink, SinkExt, Stream, TryStreamExt};
 use pb::agent_server::Agent;
 use pb::{AddServiceRequest, AddServiceResponse, DeleteServiceRequest, DeleteServiceResponse};
 use tap::TapFallible;
@@ -19,6 +23,18 @@ pub mod pb {
 }
 
 pub struct Api<Al, Pe, Pr> {
+    inner: Arc<ApiInner<Al, Pe, Pr>>,
+}
+
+impl<Al, Pe, Pr> Clone for Api<Al, Pe, Pr> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+struct ApiInner<Al, Pe, Pr> {
     addr_allocate: Al,
     persistent: Pe,
     proxy: Pr,
@@ -27,9 +43,11 @@ pub struct Api<Al, Pe, Pr> {
 impl<Al, Pe, Pr> Api<Al, Pe, Pr> {
     pub fn new(addr_allocate: Al, persistent: Pe, proxy: Pr) -> Self {
         Self {
-            addr_allocate,
-            persistent,
-            proxy,
+            inner: Arc::new(ApiInner {
+                addr_allocate,
+                persistent,
+                proxy,
+            }),
         }
     }
 
@@ -102,18 +120,25 @@ where
     Al: AddrAllocate + Send + Sync + 'static,
     Pe: Persistent + Send + Sync + 'static,
     Pr: Proxy + Send + Sync + 'static,
+    Pe::Error: Send + Sync,
 {
     // we can't mock the Streaming, so we have to test refresh_services with out stream
-    async fn refresh_services_with_stream<S: Stream<Item = Result<AddServiceRequest, Status>>>(
-        &self,
-        request: Request<S>,
-    ) -> Result<Response<AddServiceResponse>, Status> {
+    async fn refresh_services_with_stream<S, Se>(&self, request: Request<S>, sender: Se)
+    where
+        S: Stream<Item = Result<AddServiceRequest, Status>>,
+        Se: Sink<Result<AddServiceResponse, Status>>,
+        Se::Error: Error,
+    {
         let request = request.into_inner();
-        futures_util::pin_mut!(request);
 
-        let mut records = match self.persistent.load_all_records().await {
+        futures_util::pin_mut!(request);
+        futures_util::pin_mut!(sender);
+
+        let mut records = match self.inner.persistent.load_all_records().await {
             Err(err) => {
-                return Err(Status::internal(err.to_string()));
+                let _ = sender.send(Err(Status::internal(err.to_string()))).await;
+
+                return;
             }
 
             Ok(records) => records,
@@ -121,11 +146,21 @@ where
 
         info!(?records, "get exists records done");
 
-        while let Some(add_req) = request
-            .try_next()
-            .await
-            .tap_err(|err| error!(%err, "get refresh request stream entry failed"))?
-        {
+        loop {
+            let add_req = match request.try_next().await {
+                Err(err) => {
+                    error!(%err, "get refresh request stream entry failed");
+
+                    let _ = sender.send(Err(err)).await;
+
+                    return;
+                }
+
+                Ok(None) => break,
+
+                Ok(Some(add_req)) => add_req,
+            };
+
             let ns_svc = (add_req.namespace.clone(), add_req.service.clone());
 
             if records.contains_key(&ns_svc) {
@@ -138,18 +173,32 @@ where
                 {
                     error!(%err, "delete exists service before re-add failed");
 
-                    return Err(err);
+                    let _ = sender.send(Err(err)).await;
+
+                    return;
                 }
             }
 
-            if let Err(err) = self.add_service(Request::new(add_req)).await {
-                error!(%err, "add service in refresh services failed");
+            let resp = match self.add_service(Request::new(add_req)).await {
+                Err(err) => {
+                    error!(%err, "add service in refresh services failed");
 
-                return Err(err);
-            }
+                    let _ = sender.send(Err(err)).await;
+
+                    return;
+                }
+
+                Ok(resp) => resp.into_inner(),
+            };
 
             // remove added service, the remain records should be deleted
             records.remove(&ns_svc);
+
+            if let Err(err) = sender.send(Ok(resp)).await {
+                error!(%err, "send add service response in refresh services failed");
+
+                return;
+            }
         }
 
         info!("add services done");
@@ -164,17 +213,15 @@ where
                 }))
                 .await
             {
-                error!(%err, ?namespace, ?service, "delete useless service failed");
+                warn!(%err, ?namespace, ?service, "delete useless service failed");
 
-                return Err(err);
+                continue;
             }
 
             info!(?namespace, ?service, "delete useless service done");
         }
 
         info!("refresh services done");
-
-        Ok(Response::new(AddServiceResponse {}))
     }
 }
 
@@ -184,12 +231,20 @@ where
     Al: AddrAllocate + Send + Sync + 'static,
     Pe: Persistent + Send + Sync + 'static,
     Pr: Proxy + Send + Sync + 'static,
+    Pe::Error: Send + Sync,
 {
+    type RefreshServicesStream = Receiver<Result<AddServiceResponse, Status>>;
+
     async fn refresh_services(
         &self,
         request: Request<Streaming<AddServiceRequest>>,
-    ) -> Result<Response<AddServiceResponse>, Status> {
-        self.refresh_services_with_stream(request).await
+    ) -> Result<Response<Self::RefreshServicesStream>, Status> {
+        let (sender, receiver) = mpsc::channel(1);
+        let api = self.clone();
+
+        tokio::spawn(async move { api.refresh_services_with_stream(request, sender).await });
+
+        Ok(Response::new(receiver))
     }
 
     async fn add_service(
@@ -203,6 +258,7 @@ where
         info!(?request, "argument check done");
 
         let endpoints = match self
+            .inner
             .addr_allocate
             .allocate(&request.namespace, &request.service)
             .await
@@ -256,6 +312,7 @@ where
                 .collect::<Vec<_>>();
 
             if let Err(err) = self
+                .inner
                 .proxy
                 .start_proxy(&endpoints, &forward.backends, forward.protocol)
                 .await
@@ -273,6 +330,7 @@ where
         }
 
         if let Err(err) = self
+            .inner
             .persistent
             .store_record(&request.namespace, &request.service, Record { forwards })
             .await
@@ -282,7 +340,7 @@ where
 
         info!(namespace = %request.namespace, service = %request.service, "store record done");
 
-        Ok(Response::new(AddServiceResponse {}))
+        Ok(Response::new(AddServiceResponse { addr: endpoints }))
     }
 
     async fn delete_service(
@@ -292,6 +350,7 @@ where
         let request = request.into_inner();
 
         if let Err(err) = self
+            .inner
             .addr_allocate
             .deallocate(&request.namespace, &request.service)
             .await
@@ -302,6 +361,7 @@ where
         info!(namespace = %request.namespace, service = %request.service, "deallocate ip for service done");
 
         let record = match self
+            .inner
             .persistent
             .load_record(&request.namespace, &request.service)
             .await
@@ -327,6 +387,7 @@ where
                 .collect::<Vec<_>>();
 
             if let Err(err) = self
+                .inner
                 .proxy
                 .stop_proxy(&endpoints, &forward.backends, forward.protocol)
                 .await
@@ -344,6 +405,7 @@ where
         }
 
         if let Err(err) = self
+            .inner
             .persistent
             .delete_record(&request.namespace, &request.service)
             .await
@@ -361,7 +423,7 @@ where
 mod tests {
     use std::collections::HashMap;
 
-    use futures_util::stream;
+    use futures_util::{stream, StreamExt};
     use mockall::predicate::*;
     use tonic::IntoStreamingRequest;
 
@@ -704,7 +766,11 @@ mod tests {
         })]))
         .into_streaming_request();
 
-        api.refresh_services_with_stream(request).await.unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        tokio::spawn(async move { api.refresh_services_with_stream(request, sender).await });
+
+        receiver.next().await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -800,7 +866,11 @@ mod tests {
         })]))
         .into_streaming_request();
 
-        api.refresh_services_with_stream(request).await.unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        tokio::spawn(async move { api.refresh_services_with_stream(request, sender).await });
+
+        receiver.next().await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -897,6 +967,10 @@ mod tests {
         })]))
         .into_streaming_request();
 
-        api.refresh_services_with_stream(request).await.unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        tokio::spawn(async move { api.refresh_services_with_stream(request, sender).await });
+
+        receiver.next().await.unwrap().unwrap();
     }
 }
