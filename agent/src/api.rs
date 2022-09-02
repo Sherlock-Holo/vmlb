@@ -1,16 +1,12 @@
-use std::error::Error;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use futures_channel::mpsc;
-use futures_channel::mpsc::Receiver;
-use futures_util::{Sink, SinkExt, Stream, TryStreamExt};
 use pb::agent_server::Agent;
 use pb::{AddServiceRequest, AddServiceResponse, DeleteServiceRequest, DeleteServiceResponse};
 use tap::TapFallible;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 
 use crate::addr_allocate::AddrAllocate;
@@ -18,6 +14,8 @@ use crate::api::pb::Protocol;
 use crate::persistent::{Forward, Persistent, Record};
 use crate::proxy::{Network, Proxy};
 
+// prost doesn't want to add it, so we have to add by ourself
+#[allow(clippy::derive_partial_eq_without_eq)]
 pub mod pb {
     tonic::include_proto!("vmlb.agent");
 }
@@ -115,116 +113,6 @@ impl<Al, Pe, Pr> Api<Al, Pe, Pr> {
     }
 }
 
-impl<Al, Pe, Pr> Api<Al, Pe, Pr>
-where
-    Al: AddrAllocate + Send + Sync + 'static,
-    Pe: Persistent + Send + Sync + 'static,
-    Pr: Proxy + Send + Sync + 'static,
-    Pe::Error: Send + Sync,
-{
-    // we can't mock the Streaming, so we have to test refresh_services with out stream
-    async fn refresh_services_with_stream<S, Se>(&self, request: Request<S>, sender: Se)
-    where
-        S: Stream<Item = Result<AddServiceRequest, Status>>,
-        Se: Sink<Result<AddServiceResponse, Status>>,
-        Se::Error: Error,
-    {
-        let request = request.into_inner();
-
-        futures_util::pin_mut!(request);
-        futures_util::pin_mut!(sender);
-
-        let mut records = match self.inner.persistent.load_all_records().await {
-            Err(err) => {
-                let _ = sender.send(Err(Status::internal(err.to_string()))).await;
-
-                return;
-            }
-
-            Ok(records) => records,
-        };
-
-        info!(?records, "get exists records done");
-
-        loop {
-            let add_req = match request.try_next().await {
-                Err(err) => {
-                    error!(%err, "get refresh request stream entry failed");
-
-                    let _ = sender.send(Err(err)).await;
-
-                    return;
-                }
-
-                Ok(None) => break,
-
-                Ok(Some(add_req)) => add_req,
-            };
-
-            let ns_svc = (add_req.namespace.clone(), add_req.service.clone());
-
-            if records.contains_key(&ns_svc) {
-                if let Err(err) = self
-                    .delete_service(Request::new(DeleteServiceRequest {
-                        namespace: add_req.namespace.clone(),
-                        service: add_req.service.clone(),
-                    }))
-                    .await
-                {
-                    error!(%err, "delete exists service before re-add failed");
-
-                    let _ = sender.send(Err(err)).await;
-
-                    return;
-                }
-            }
-
-            let resp = match self.add_service(Request::new(add_req)).await {
-                Err(err) => {
-                    error!(%err, "add service in refresh services failed");
-
-                    let _ = sender.send(Err(err)).await;
-
-                    return;
-                }
-
-                Ok(resp) => resp.into_inner(),
-            };
-
-            // remove added service, the remain records should be deleted
-            records.remove(&ns_svc);
-
-            if let Err(err) = sender.send(Ok(resp)).await {
-                error!(%err, "send add service response in refresh services failed");
-
-                return;
-            }
-        }
-
-        info!("add services done");
-
-        info!(?records, "delete useless services");
-
-        for ((namespace, service), _) in records.into_iter() {
-            if let Err(err) = self
-                .delete_service(Request::new(DeleteServiceRequest {
-                    namespace: namespace.clone(),
-                    service: service.clone(),
-                }))
-                .await
-            {
-                warn!(%err, ?namespace, ?service, "delete useless service failed");
-
-                continue;
-            }
-
-            info!(?namespace, ?service, "delete useless service done");
-        }
-
-        info!("refresh services done");
-    }
-}
-
 #[async_trait::async_trait]
 impl<Al, Pe, Pr> Agent for Api<Al, Pe, Pr>
 where
@@ -233,20 +121,6 @@ where
     Pr: Proxy + Send + Sync + 'static,
     Pe::Error: Send + Sync,
 {
-    type RefreshServicesStream = Receiver<Result<AddServiceResponse, Status>>;
-
-    async fn refresh_services(
-        &self,
-        request: Request<Streaming<AddServiceRequest>>,
-    ) -> Result<Response<Self::RefreshServicesStream>, Status> {
-        let (sender, receiver) = mpsc::channel(1);
-        let api = self.clone();
-
-        tokio::spawn(async move { api.refresh_services_with_stream(request, sender).await });
-
-        Ok(Response::new(receiver))
-    }
-
     async fn add_service(
         &self,
         request: Request<AddServiceRequest>,
@@ -421,11 +295,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use futures_util::{stream, StreamExt};
     use mockall::predicate::*;
-    use tonic::IntoStreamingRequest;
 
     use super::*;
     use crate::addr_allocate::MockAddrAllocate;
@@ -711,266 +581,5 @@ mod tests {
         }))
         .await
         .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_refresh_service() {
-        let mut addr_allocate = MockAddrAllocate::new();
-        let mut persistent = MockPersistent::new();
-        let mut proxy = MockProxy::new();
-
-        persistent
-            .expect_load_all_records()
-            .returning(|| Ok(HashMap::new()));
-        addr_allocate
-            .expect_allocate()
-            .with(eq("default"), eq("test"))
-            .returning(|_, _| Ok(vec!["127.0.0.1".to_string()]));
-        proxy
-            .expect_start_proxy()
-            .withf(|listen_addr, backends, network| {
-                listen_addr == ["127.0.0.1:80".to_string()].as_slice()
-                    && backends == ["1.1.1.1:80".parse().unwrap()].as_slice()
-                    && *network == Network::TCP
-            })
-            .returning(|_, _, _| Ok(()));
-        persistent
-            .expect_store_record()
-            .with(
-                eq("default"),
-                eq("test"),
-                eq(Record {
-                    forwards: vec![Forward {
-                        endpoints: vec!["127.0.0.1".to_string()],
-                        port: 80,
-                        protocol: Network::TCP,
-                        backends: vec!["1.1.1.1:80".parse().unwrap()],
-                    }],
-                }),
-            )
-            .returning(|_, _, _| Ok(()));
-
-        let api = Api::new(addr_allocate, persistent, proxy);
-
-        let request = Request::new(stream::iter([Ok(AddServiceRequest {
-            namespace: "default".to_string(),
-            service: "test".to_string(),
-            forwards: vec![pb::Forward {
-                protocol: Protocol::Tcp as _,
-                port: 80,
-                backends: vec![Backend {
-                    addr: "1.1.1.1".to_string(),
-                    target_port: 80,
-                }],
-            }],
-        })]))
-        .into_streaming_request();
-
-        let (sender, mut receiver) = mpsc::channel(1);
-
-        tokio::spawn(async move { api.refresh_services_with_stream(request, sender).await });
-
-        receiver.next().await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_refresh_service_with_useless() {
-        let mut addr_allocate = MockAddrAllocate::new();
-        let mut persistent = MockPersistent::new();
-        let mut proxy = MockProxy::new();
-
-        persistent.expect_load_all_records().returning(|| {
-            Ok(HashMap::from([(
-                ("default".to_string(), "foo".to_string()),
-                Record {
-                    forwards: vec![Forward {
-                        endpoints: vec!["127.0.0.1".to_string()],
-                        port: 80,
-                        protocol: Network::TCP,
-                        backends: vec!["1.1.1.1:80".parse().unwrap()],
-                    }],
-                },
-            )]))
-        });
-        addr_allocate
-            .expect_allocate()
-            .with(eq("default"), eq("bar"))
-            .returning(|_, _| Ok(vec!["127.0.0.2".to_string()]));
-        proxy
-            .expect_start_proxy()
-            .withf(|listen_addr, backends, network| {
-                listen_addr == ["127.0.0.2:80".to_string()].as_slice()
-                    && backends == ["1.1.1.1:80".parse().unwrap()].as_slice()
-                    && *network == Network::TCP
-            })
-            .returning(|_, _, _| Ok(()));
-        persistent
-            .expect_store_record()
-            .with(
-                eq("default"),
-                eq("bar"),
-                eq(Record {
-                    forwards: vec![Forward {
-                        endpoints: vec!["127.0.0.2".to_string()],
-                        port: 80,
-                        protocol: Network::TCP,
-                        backends: vec!["1.1.1.1:80".parse().unwrap()],
-                    }],
-                }),
-            )
-            .returning(|_, _, _| Ok(()));
-
-        addr_allocate
-            .expect_deallocate()
-            .with(eq("default"), eq("foo"))
-            .returning(|_, _| Ok(()));
-        persistent
-            .expect_load_record()
-            .with(eq("default"), eq("foo"))
-            .returning(|_, _| {
-                Ok(Some(Record {
-                    forwards: vec![Forward {
-                        endpoints: vec!["127.0.0.1".to_string()],
-                        port: 80,
-                        protocol: Network::TCP,
-                        backends: vec!["1.1.1.1:80".parse().unwrap()],
-                    }],
-                }))
-            });
-        proxy
-            .expect_stop_proxy()
-            .withf(|listen_addr, backends, network| {
-                listen_addr == ["127.0.0.1:80".to_string()].as_slice()
-                    && backends == ["1.1.1.1:80".parse().unwrap()].as_slice()
-                    && *network == Network::TCP
-            })
-            .returning(|_, _, _| Ok(()));
-        persistent
-            .expect_delete_record()
-            .with(eq("default"), eq("foo"))
-            .returning(|_, _| Ok(()));
-
-        let api = Api::new(addr_allocate, persistent, proxy);
-
-        let request = Request::new(stream::iter([Ok(AddServiceRequest {
-            namespace: "default".to_string(),
-            service: "bar".to_string(),
-            forwards: vec![pb::Forward {
-                protocol: Protocol::Tcp as _,
-                port: 80,
-                backends: vec![Backend {
-                    addr: "1.1.1.1".to_string(),
-                    target_port: 80,
-                }],
-            }],
-        })]))
-        .into_streaming_request();
-
-        let (sender, mut receiver) = mpsc::channel(1);
-
-        tokio::spawn(async move { api.refresh_services_with_stream(request, sender).await });
-
-        receiver.next().await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_refresh_service_same_service() {
-        let mut addr_allocate = MockAddrAllocate::new();
-        let mut persistent = MockPersistent::new();
-        let mut proxy = MockProxy::new();
-
-        persistent.expect_load_all_records().returning(|| {
-            Ok(HashMap::from([(
-                ("default".to_string(), "test".to_string()),
-                Record {
-                    forwards: vec![Forward {
-                        endpoints: vec!["127.0.0.1".to_string()],
-                        port: 80,
-                        protocol: Network::TCP,
-                        backends: vec!["1.1.1.1:80".parse().unwrap()],
-                    }],
-                },
-            )]))
-        });
-
-        addr_allocate
-            .expect_deallocate()
-            .with(eq("default"), eq("test"))
-            .returning(|_, _| Ok(()));
-        persistent
-            .expect_load_record()
-            .with(eq("default"), eq("test"))
-            .returning(|_, _| {
-                Ok(Some(Record {
-                    forwards: vec![Forward {
-                        endpoints: vec!["127.0.0.1".to_string()],
-                        port: 80,
-                        protocol: Network::TCP,
-                        backends: vec!["1.1.1.1:80".parse().unwrap()],
-                    }],
-                }))
-            });
-        proxy
-            .expect_stop_proxy()
-            .withf(|listen_addr, backends, network| {
-                listen_addr == ["127.0.0.1:80".to_string()].as_slice()
-                    && backends == ["1.1.1.1:80".parse().unwrap()].as_slice()
-                    && *network == Network::TCP
-            })
-            .returning(|_, _, _| Ok(()));
-        persistent
-            .expect_delete_record()
-            .with(eq("default"), eq("test"))
-            .returning(|_, _| Ok(()));
-
-        addr_allocate
-            .expect_allocate()
-            .with(eq("default"), eq("test"))
-            .returning(|_, _| Ok(vec!["127.0.0.2".to_string()]));
-        proxy
-            .expect_start_proxy()
-            .withf(|listen_addr, backends, network| {
-                listen_addr == ["127.0.0.2:80".to_string()].as_slice()
-                    && backends == ["1.1.1.1:80".parse().unwrap()].as_slice()
-                    && *network == Network::TCP
-            })
-            .returning(|_, _, _| Ok(()));
-        persistent
-            .expect_store_record()
-            .with(
-                eq("default"),
-                eq("test"),
-                eq(Record {
-                    forwards: vec![Forward {
-                        endpoints: vec!["127.0.0.2".to_string()],
-                        port: 80,
-                        protocol: Network::TCP,
-                        backends: vec!["1.1.1.1:80".parse().unwrap()],
-                    }],
-                }),
-            )
-            .returning(|_, _, _| Ok(()));
-
-        let api = Api::new(addr_allocate, persistent, proxy);
-
-        let request = Request::new(stream::iter([Ok(AddServiceRequest {
-            namespace: "default".to_string(),
-            service: "test".to_string(),
-            forwards: vec![pb::Forward {
-                protocol: Protocol::Tcp as _,
-                port: 80,
-                backends: vec![Backend {
-                    addr: "1.1.1.1".to_string(),
-                    target_port: 80,
-                }],
-            }],
-        })]))
-        .into_streaming_request();
-
-        let (sender, mut receiver) = mpsc::channel(1);
-
-        tokio::spawn(async move { api.refresh_services_with_stream(request, sender).await });
-
-        receiver.next().await.unwrap().unwrap();
     }
 }

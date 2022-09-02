@@ -44,9 +44,6 @@ message DeleteServiceRequest {
 message DeleteServiceResponse {}
 
 service Agent {
-  // refresh all services
-  rpc RefreshServices(stream AddServiceRequest) returns (stream AddServiceResponse) {}
-
   // add or update service
   rpc AddService(AddServiceRequest) returns (AddServiceResponse) {}
 

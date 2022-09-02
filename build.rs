@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-changed=proto/agent.proto");
+
     // when build.rs support check cfg test, enable it
     /*tonic_build::configure()
     .build_client(true)

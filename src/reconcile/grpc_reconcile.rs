@@ -15,7 +15,6 @@ use kube::runtime::controller::Action;
 use kube::{Api, Client};
 use pb::agent_client::AgentClient;
 use pb::Forward;
-use serde_json::Value;
 use tap::TapFallible;
 use thiserror::Error;
 use tonic::body::BoxBody;
@@ -474,7 +473,6 @@ mod tests {
     use kube::api::ObjectList;
     use serde_json::Value;
     use tonic::transport::{Endpoint, Server};
-    use tonic::Streaming;
     use tower_test::mock;
 
     use super::*;
@@ -564,15 +562,6 @@ mod tests {
 
         #[async_trait]
         impl Agent for TestAgentServer {
-            type RefreshServicesStream = stream::Empty<Result<AddServiceResponse, Status>>;
-
-            async fn refresh_services(
-                &self,
-                _request: tonic::Request<Streaming<AddServiceRequest>>,
-            ) -> Result<tonic::Response<Self::RefreshServicesStream>, Status> {
-                unreachable!()
-            }
-
             async fn add_service(
                 &self,
                 request: tonic::Request<AddServiceRequest>,
@@ -736,15 +725,6 @@ mod tests {
 
         #[async_trait]
         impl Agent for TestAgentServer {
-            type RefreshServicesStream = stream::Empty<Result<AddServiceResponse, Status>>;
-
-            async fn refresh_services(
-                &self,
-                request: tonic::Request<Streaming<AddServiceRequest>>,
-            ) -> Result<tonic::Response<Self::RefreshServicesStream>, Status> {
-                unreachable!()
-            }
-
             async fn add_service(
                 &self,
                 request: tonic::Request<AddServiceRequest>,
@@ -990,15 +970,6 @@ mod tests {
 
         #[async_trait]
         impl Agent for TestAgentServer {
-            type RefreshServicesStream = stream::Empty<Result<AddServiceResponse, Status>>;
-
-            async fn refresh_services(
-                &self,
-                _request: tonic::Request<Streaming<AddServiceRequest>>,
-            ) -> Result<tonic::Response<Self::RefreshServicesStream>, Status> {
-                unreachable!()
-            }
-
             async fn add_service(
                 &self,
                 _request: tonic::Request<AddServiceRequest>,
