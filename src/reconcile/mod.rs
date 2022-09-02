@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::sync::Arc;
 
+pub use grpc_reconcile::GrpcReconcile;
 use k8s_openapi::api::core::v1::Service;
 use kube::runtime::controller::Action;
 

@@ -99,9 +99,9 @@ where
     RespBody: Body<Data = Bytes> + Send + 'static,
     RespBody::Error: Into<Box<dyn StdError + Send + Sync>> + Send,
 {
-    pub fn new(service: S, kube_client: Client) -> Self {
+    pub fn new(agent_client_service: S, kube_client: Client) -> Self {
         Self {
-            agent_client: AgentClient::new(service),
+            agent_client: AgentClient::new(agent_client_service),
             kube_client,
         }
     }
