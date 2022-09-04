@@ -1,5 +1,6 @@
 use std::io::{Error, ErrorKind};
 use std::net::Ipv4Addr;
+use std::process::Stdio;
 
 use futures_util::future::AbortHandle;
 use futures_util::{future, TryStreamExt};
@@ -279,7 +280,7 @@ impl AddrAllocate for VethAddrAllocate {
     type Error = Error;
 
     async fn allocate(&self, namespace: &str, service: &str) -> Result<Vec<String>, Self::Error> {
-        let (nic_name, peer) = get_nic_name(namespace, service);
+        let (nic_name, peer) = get_nic_names(namespace, service);
 
         let link_message = self
             .get_nic_info(&nic_name)
@@ -323,10 +324,12 @@ impl AddrAllocate for VethAddrAllocate {
     }
 
     async fn deallocate(&self, namespace: &str, service: &str) -> Result<(), Self::Error> {
-        let nic_name = format!("{}-{}", namespace, service);
+        let (nic_name, _) = get_nic_names(namespace, service);
 
         let mut child = Command::new("dhclient")
             .args(["-r", nic_name.as_ref()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .tap_err(|err| error!(%err, nic_name, "spawn dhclient -r failed"))?;
         let exit_status = child
@@ -395,7 +398,7 @@ impl Drop for VethAddrAllocate {
     }
 }
 
-fn get_nic_name(namespace: &str, name: &str) -> (String, String) {
+fn get_nic_names(namespace: &str, name: &str) -> (String, String) {
     let mut buf = [0u8; 16].into();
     let mut hasher = Md5::new();
 
