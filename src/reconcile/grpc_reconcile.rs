@@ -34,7 +34,7 @@ mod pb {
 }
 
 const VMLB_ANNOTATION_PORTS_KEY: &str = "vmlb/last-ports-config";
-const VMLB_FINALIZER: &str = "vmlb-finalizer";
+const VMLB_FINALIZER: &str = "vmlb.api.sherlockholo.io/service-finalizer";
 const REQUEUE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error)]
@@ -111,7 +111,6 @@ where
         namespace: &str,
         name: &str,
         ports: &[ServicePort],
-        annotations: &mut BTreeMap<String, String>,
         node_addrs: &[IpAddr],
         finalizers: Vec<String>,
     ) -> Result<Action, Error> {
@@ -120,7 +119,7 @@ where
 
         info!(?ports, %ports_config, "marshal ports done");
 
-        annotations.insert(VMLB_ANNOTATION_PORTS_KEY.to_string(), ports_config);
+        let annotations = BTreeMap::from([(VMLB_ANNOTATION_PORTS_KEY.to_string(), ports_config)]);
 
         let forwards = ports
             .iter()
@@ -184,18 +183,33 @@ where
             "metadata": {
                 "annotations": annotations,
                 "finalizers": finalizers
-            },
-            "status": status
+            }
         });
-        let patch = Patch::Apply(patch_content);
+        let patch = Patch::Merge(patch_content);
 
         let api = Api::<Service>::namespaced(self.kube_client.clone(), namespace);
 
         api.patch(name, &PatchParams::default(), &patch)
             .await
-            .tap_err(|err| error!(namespace, name, ?patch, %err, "patch service failed"))?;
+            .tap_err(|err| error!(namespace, name, ?patch, %err, "patch service metadata and spec failed"))?;
 
-        info!(namespace, name, ?patch, "patch service done");
+        info!(
+            namespace,
+            name,
+            ?patch,
+            "patch service metadata and spec done"
+        );
+
+        let patch_status = serde_json::json!({ "status": status });
+        let patch_status = Patch::Merge(patch_status);
+
+        api.patch_status(name, &PatchParams::default(), &patch_status)
+            .await
+            .tap_err(
+                |err| error!(namespace, name, ?patch_status, %err, "patch service status failed"),
+            )?;
+
+        info!(namespace, name, ?patch_status, "patch service status done");
 
         Ok(Action::await_change())
     }
@@ -238,12 +252,7 @@ where
             Some(name) => name,
         };
 
-        let mut annotations = service
-            .metadata
-            .annotations
-            .as_ref()
-            .cloned()
-            .unwrap_or_default();
+        let annotations = service.metadata.annotations.as_ref();
         let mut finalizers = service
             .metadata
             .finalizers
@@ -302,17 +311,10 @@ where
 
         info!(?node_addrs, "get node addrs done");
 
-        match annotations.get(VMLB_ANNOTATION_PORTS_KEY) {
+        match annotations.and_then(|annotations| annotations.get(VMLB_ANNOTATION_PORTS_KEY)) {
             None => {
-                self.add_service(
-                    namespace,
-                    name,
-                    ports,
-                    &mut annotations,
-                    &node_addrs,
-                    finalizers,
-                )
-                .await
+                self.add_service(namespace, name, ports, &node_addrs, finalizers)
+                    .await
             }
 
             Some(last_port_config) => {
@@ -339,15 +341,8 @@ where
                 }
 
                 self.delete_service(namespace, name).await?;
-                self.add_service(
-                    namespace,
-                    name,
-                    ports,
-                    &mut annotations,
-                    &node_addrs,
-                    finalizers,
-                )
-                .await
+                self.add_service(namespace, name, ports, &node_addrs, finalizers)
+                    .await
             }
         }
     }
@@ -423,7 +418,7 @@ where
                 );
             }
         }
-        let patch = Patch::Apply(patch);
+        let patch = Patch::Merge(patch);
 
         Api::<Service>::namespaced(self.kube_client.clone(), namespace)
             .patch(name, &PatchParams::default(), &patch)
@@ -652,46 +647,48 @@ mod tests {
                 .unwrap(),
             )));
 
-            let (request, send) = k8s_handle.next_request().await.unwrap();
-            assert_eq!(request.method(), Method::PATCH);
-            assert_eq!(
-                request.uri().to_string(),
-                "/api/v1/namespaces/default/services/test?"
-            );
+            for uri in [
+                "/api/v1/namespaces/default/services/test?",
+                "/api/v1/namespaces/default/services/test/status?",
+            ] {
+                let (request, send) = k8s_handle.next_request().await.unwrap();
+                assert_eq!(request.method(), Method::PATCH);
+                assert_eq!(request.uri().to_string(), uri);
 
-            let service = Service {
-                metadata: ObjectMeta {
-                    namespace: Some("default".to_string()),
-                    name: Some("test".to_string()),
-                    finalizers: Some(vec![VMLB_FINALIZER.to_string()]),
-                    ..Default::default()
-                },
-                spec: Some(ServiceSpec {
-                    type_: Some("LoadBalancer".to_string()),
-                    ports: Some(vec![ServicePort {
-                        port: 80,
-                        protocol: Some("TCP".to_string()),
-                        target_port: Some(IntOrString::Int(80)),
-                        node_port: Some(36666),
+                let service = Service {
+                    metadata: ObjectMeta {
+                        namespace: Some("default".to_string()),
+                        name: Some("test".to_string()),
+                        finalizers: Some(vec![VMLB_FINALIZER.to_string()]),
                         ..Default::default()
-                    }]),
-                    ..Default::default()
-                }),
-                status: Some(ServiceStatus {
-                    load_balancer: Some(LoadBalancerStatus {
-                        ingress: Some(vec![LoadBalancerIngress {
-                            hostname: None,
-                            ip: Some("192.168.1.1".to_string()),
-                            ports: None,
+                    },
+                    spec: Some(ServiceSpec {
+                        type_: Some("LoadBalancer".to_string()),
+                        ports: Some(vec![ServicePort {
+                            port: 80,
+                            protocol: Some("TCP".to_string()),
+                            target_port: Some(IntOrString::Int(80)),
+                            node_port: Some(36666),
+                            ..Default::default()
                         }]),
+                        ..Default::default()
                     }),
-                    ..Default::default()
-                }),
-            };
+                    status: Some(ServiceStatus {
+                        load_balancer: Some(LoadBalancerStatus {
+                            ingress: Some(vec![LoadBalancerIngress {
+                                hostname: None,
+                                ip: Some("192.168.1.1".to_string()),
+                                ports: None,
+                            }]),
+                        }),
+                        ..Default::default()
+                    }),
+                };
 
-            send.send_response(Response::new(hyper::Body::from(
-                serde_json::to_string(&service).unwrap(),
-            )));
+                send.send_response(Response::new(hyper::Body::from(
+                    serde_json::to_string(&service).unwrap(),
+                )));
+            }
         });
 
         let service = Arc::new(Service {
@@ -834,22 +831,6 @@ mod tests {
             let patch: Value =
                 serde_json::from_slice(&data.copy_to_bytes(data.remaining())).unwrap();
 
-            let status = patch.get("status").unwrap();
-            let status: ServiceStatus = serde_json::from_value(status.clone()).unwrap();
-            assert_eq!(
-                status,
-                ServiceStatus {
-                    conditions: None,
-                    load_balancer: Some(LoadBalancerStatus {
-                        ingress: Some(vec![LoadBalancerIngress {
-                            hostname: None,
-                            ip: Some("192.168.1.2".to_string()),
-                            ports: None,
-                        }])
-                    }),
-                }
-            );
-
             let annotations = patch
                 .get("metadata")
                 .unwrap()
@@ -884,6 +865,47 @@ mod tests {
                 .as_array()
                 .unwrap()[0];
             assert_eq!(finalizer.as_str().unwrap(), VMLB_FINALIZER);
+
+            let service = Service {
+                metadata: ObjectMeta {
+                    namespace: Some("default".to_string()),
+                    name: Some("test".to_string()),
+                    finalizers: Some(vec![VMLB_FINALIZER.to_string()]),
+                    ..Default::default()
+                },
+                spec: Some(ServiceSpec {
+                    type_: Some("LoadBalancer".to_string()),
+                    ports: Some(vec![ServicePort {
+                        port: 80,
+                        protocol: Some("TCP".to_string()),
+                        target_port: Some(IntOrString::Int(80)),
+                        node_port: Some(36666),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                status: Some(ServiceStatus {
+                    load_balancer: Some(LoadBalancerStatus {
+                        ingress: Some(vec![LoadBalancerIngress {
+                            hostname: None,
+                            ip: Some("192.168.1.1".to_string()),
+                            ports: None,
+                        }]),
+                    }),
+                    ..Default::default()
+                }),
+            };
+
+            send.send_response(Response::new(hyper::Body::from(
+                serde_json::to_string(&service).unwrap(),
+            )));
+
+            let (request, send) = k8s_handle.next_request().await.unwrap();
+            assert_eq!(request.method(), Method::PATCH);
+            assert_eq!(
+                request.uri().to_string(),
+                "/api/v1/namespaces/default/services/test/status?"
+            );
 
             let service = Service {
                 metadata: ObjectMeta {
