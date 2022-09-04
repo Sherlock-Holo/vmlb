@@ -281,10 +281,10 @@ impl AddrAllocate for VethAddrAllocate {
     async fn allocate(&self, namespace: &str, service: &str) -> Result<Vec<String>, Self::Error> {
         let (nic_name, peer) = get_nic_name(namespace, service);
 
-        let link_message =
-            self.get_nic_info(&nic_name)
-                .await
-                .tap_ok(|link| if link.is_none() {})?;
+        let link_message = self
+            .get_nic_info(&nic_name)
+            .await
+            .tap_ok(|link| if link.is_none() {})?;
 
         if let Some(link_message) = link_message {
             let is_veth = self.nic_is_veth(&nic_name, &link_message).await?;
