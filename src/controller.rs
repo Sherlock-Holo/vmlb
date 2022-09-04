@@ -1,12 +1,17 @@
 use std::error::Error;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
-use futures_util::{future, StreamExt};
+use futures_util::{future, Stream, StreamExt};
 use k8s_openapi::api::core::v1::Service;
 use kube::api::ListParams;
 use kube::runtime::controller::Action;
 use kube::runtime::Controller as RuntimeController;
 use kube::{Api, Client};
+use tokio::time;
+use tokio::time::Interval;
 
 use crate::reconcile::Reconcile;
 
@@ -34,6 +39,7 @@ where
         let api = Api::<Service>::all(client);
 
         RuntimeController::new(api, ListParams::default())
+            .reconcile_all_on(IntervalStream::new(Duration::from_secs(60 * 5)))
             .run(reconcile, error_policy, reconciler)
             .for_each(|_| future::ready(()))
             .await;
@@ -54,4 +60,26 @@ async fn reconcile<R: Reconcile>(service: Arc<Service>, ctx: Arc<R>) -> Result<A
 /// an error handler that will be called when the reconciler fails
 fn error_policy<R: Reconcile>(err: &R::Error, ctx: Arc<R>) -> Action {
     ctx.error_handle(err)
+}
+
+struct IntervalStream(Interval);
+
+impl IntervalStream {
+    pub fn new(period: Duration) -> Self {
+        let start = Instant::now() + period;
+
+        Self(time::interval_at(start.into(), period))
+    }
+}
+
+impl Stream for IntervalStream {
+    type Item = ();
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut interval = Pin::new(&mut self.0);
+
+        futures_util::ready!(interval.poll_tick(cx));
+
+        Poll::Ready(Some(()))
+    }
 }
