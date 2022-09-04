@@ -52,7 +52,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
 fn init_log() {
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_line_number(true))
         .with(LevelFilter::INFO)
         .init();
 }

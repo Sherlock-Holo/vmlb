@@ -3,6 +3,8 @@ use std::net::Ipv4Addr;
 
 use futures_util::future::AbortHandle;
 use futures_util::{future, TryStreamExt};
+use md5::{Digest, Md5};
+use nix::errno::Errno;
 use rtnetlink::packet::address::Nla as AddressNla;
 use rtnetlink::packet::link::nlas::{Info, InfoKind, Nla as LinkNla};
 use rtnetlink::packet::{AddressMessage, LinkMessage, AF_INET};
@@ -13,6 +15,8 @@ use tokio::process::Command;
 use tracing::{error, info, warn};
 
 use crate::addr_allocate::AddrAllocate;
+
+const MAX_NIC_NAME_LEN: usize = 13;
 
 pub struct VethAddrAllocate {
     bridge_index: u32,
@@ -51,42 +55,49 @@ impl VethAddrAllocate {
         })
     }
 
-    async fn allocate_veth(&self, nic_name: &str) -> Result<(), Error> {
-        let peer = format!("{}-peer", nic_name);
-
+    async fn allocate_veth(&self, nic_name: &str, peer: &str) -> Result<(), Error> {
         self.handle
             .link()
             .add()
-            .veth(nic_name.to_string(), peer.clone())
+            .veth(nic_name.to_string(), peer.to_string())
             .execute()
             .await
             .map_err(|err| {
-                error!(%err, nic_name, "allocate veth failed");
+                error!(%err, nic_name, peer, "allocate veth failed");
 
                 Error::new(ErrorKind::Other, err)
             })?;
+
+        info!(nic_name, peer, "add veth done");
 
         let peer_info = self
             .handle
             .link()
             .get()
-            .match_name(peer.clone())
+            .match_name(peer.to_string())
             .execute()
             .try_next()
             .await
             .map_err(|err| {
-                error!(%err, %peer, "get peer nic info failed");
+                error!(%err, peer, "get peer nic info failed");
 
                 Error::new(ErrorKind::Other, err)
             })?
             .ok_or_else(|| {
-                error!(%peer, "get peer nic info failed, peer not exists");
+                error!(peer, "get peer nic info failed, peer not exists");
 
                 Error::new(
                     ErrorKind::NotFound,
                     format!("get peer {} nic info failed, peer not exists", peer),
                 )
             })?;
+
+        info!(
+            nic_name,
+            peer,
+            peer_index = peer_info.header.index,
+            "get peer index done"
+        );
 
         self.handle
             .link()
@@ -99,6 +110,13 @@ impl VethAddrAllocate {
 
                 Error::new(ErrorKind::Other, err)
             })?;
+
+        info!(
+            nic_name,
+            peer,
+            bridge_index = self.bridge_index,
+            "set peer master to bridge done"
+        );
 
         Ok(())
     }
@@ -230,18 +248,29 @@ impl VethAddrAllocate {
     }
 
     async fn get_nic_info(&self, nic_name: &str) -> Result<Option<LinkMessage>, Error> {
-        self.handle
+        match self
+            .handle
             .link()
             .get()
             .match_name(nic_name.to_string())
             .execute()
             .try_next()
             .await
-            .map_err(|err| {
+        {
+            Err(rtnetlink::Error::NetlinkError(err))
+                if err.to_io().raw_os_error() == Some(Errno::ENODEV as i32) =>
+            {
+                Ok(None)
+            }
+
+            Err(err) => {
                 error!(%err, nic_name, "get nic info failed");
 
-                Error::new(ErrorKind::Other, err)
-            })
+                Err(Error::new(ErrorKind::Other, err))
+            }
+
+            Ok(link) => Ok(link),
+        }
     }
 }
 
@@ -250,9 +279,12 @@ impl AddrAllocate for VethAddrAllocate {
     type Error = Error;
 
     async fn allocate(&self, namespace: &str, service: &str) -> Result<Vec<String>, Self::Error> {
-        let nic_name = format!("{}-{}", namespace, service);
+        let (nic_name, peer) = get_nic_name(namespace, service);
 
-        let link_message = self.get_nic_info(&nic_name).await?;
+        let link_message =
+            self.get_nic_info(&nic_name)
+                .await
+                .tap_ok(|link| if link.is_none() {})?;
 
         if let Some(link_message) = link_message {
             let is_veth = self.nic_is_veth(&nic_name, &link_message).await?;
@@ -279,7 +311,7 @@ impl AddrAllocate for VethAddrAllocate {
             return Ok(addrs);
         }
 
-        self.allocate_veth(&nic_name).await?;
+        self.allocate_veth(&nic_name, &peer).await?;
 
         info!(%nic_name, "allocate veth done");
 
@@ -361,4 +393,23 @@ impl Drop for VethAddrAllocate {
     fn drop(&mut self) {
         self.netlink_task_stop.abort();
     }
+}
+
+fn get_nic_name(namespace: &str, name: &str) -> (String, String) {
+    let mut buf = [0u8; 16].into();
+    let mut hasher = Md5::new();
+
+    hasher.update(format!("{}-{}", namespace, name).as_bytes());
+    hasher.finalize_into_reset(&mut buf);
+
+    let mut nic_name = format!("{:x}", buf);
+    nic_name.truncate(MAX_NIC_NAME_LEN);
+
+    hasher.update(format!("{}-{}-peer", namespace, name).as_bytes());
+    hasher.finalize_into(&mut buf);
+
+    let mut peer = format!("{:x}", buf);
+    peer.truncate(MAX_NIC_NAME_LEN);
+
+    (nic_name, peer)
 }
