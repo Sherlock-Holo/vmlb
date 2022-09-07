@@ -155,6 +155,7 @@ where
                 } else if forward.protocol == Protocol::Udp as i32 {
                     Network::UDP
                 } else {
+                    // add_service_check has checked
                     unreachable!()
                 };
 

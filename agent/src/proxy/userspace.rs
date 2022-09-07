@@ -52,11 +52,21 @@ impl UserspaceProxy {
         listen_addr: SocketAddr,
         backends: Vec<SocketAddr>,
     ) -> Result<()> {
+        let proxy_key = ProxyKey {
+            listen_addr,
+            backends: backends.clone(),
+            network: Network::TCP,
+        };
+
+        if self.proxies.contains_key(&proxy_key) {
+            info!(?proxy_key, "tcp proxy already exists");
+
+            return Ok(());
+        }
+
         let listener = TcpListener::bind(listen_addr)
             .await
             .tap_err(|err| error!(%err, %listen_addr, "listen tcp failed"))?;
-
-        let backends_key = backends.clone();
 
         let (fut, abort_handle) = future::abortable(async move {
             loop {
@@ -101,14 +111,7 @@ impl UserspaceProxy {
 
         tokio::spawn(fut);
 
-        self.proxies.insert(
-            ProxyKey {
-                listen_addr,
-                backends: backends_key,
-                network: Network::TCP,
-            },
-            abort_handle,
-        );
+        self.proxies.insert(proxy_key, abort_handle);
 
         Ok(())
     }
@@ -118,12 +121,23 @@ impl UserspaceProxy {
         listen_addr: SocketAddr,
         backends: Vec<SocketAddr>,
     ) -> Result<()> {
+        let proxy_key = ProxyKey {
+            listen_addr,
+            backends: backends.clone(),
+            network: Network::UDP,
+        };
+
+        if self.proxies.contains_key(&proxy_key) {
+            info!(?proxy_key, "udp proxy already exists");
+
+            return Ok(());
+        }
+
         let listener = UdpSocket::bind(listen_addr)
             .await
             .tap_err(|err| error!(%err, %listen_addr, "listen tcp failed"))?;
         let listener = Arc::new(listener);
 
-        let backends_key = backends.clone();
         let udp_connection_track = self.udp_connection_track.clone();
 
         let (fut, abort_handle) = future::abortable(async move {
@@ -222,14 +236,7 @@ impl UserspaceProxy {
 
         tokio::spawn(fut);
 
-        self.proxies.insert(
-            ProxyKey {
-                listen_addr,
-                backends: backends_key,
-                network: Network::UDP,
-            },
-            abort_handle,
-        );
+        self.proxies.insert(proxy_key, abort_handle);
 
         Ok(())
     }
@@ -294,7 +301,7 @@ impl Proxy for UserspaceProxy {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        info!(?listen_addr, ?network, "parse listen addr done");
+        info!(?listen_addr, ?network, "parse listen addrs done");
 
         match network {
             Network::TCP => {
