@@ -332,7 +332,10 @@ where
                             ports.sort_by(|a, b| a.port.cmp(&b.port));
 
                             if last_port_config == ports {
-                                info!(namespace, name, "ignore unchanged service");
+                                self.add_service(namespace, name, &ports, &node_addrs, finalizers)
+                                    .await?;
+
+                                info!(namespace, name, "reconcile unchanged service done");
 
                                 return Ok(Action::await_change());
                             }
