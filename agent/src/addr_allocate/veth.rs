@@ -383,7 +383,7 @@ impl VethAddrAllocate {
                     Ok(pid) => pid,
                 };
                 let pid = String::from_utf8_lossy(&pid);
-                let pid = match pid.parse::<u32>() {
+                let pid = match pid.trim().parse::<u32>() {
                     Err(err) => {
                         error!(%nic_name, %pid, %err, "parse pid to u32 failed");
 
@@ -467,6 +467,11 @@ impl AddrAllocate for VethAddrAllocate {
                     ErrorKind::Other,
                     format!("nic {} exists but is not veth", nic_name),
                 ));
+            }
+
+            // add not record nic
+            if !self.inner.nic_list.contains(&nic_name) {
+                self.inner.nic_list.insert(nic_name.clone());
             }
 
             let addrs = self.get_exists_veth_ip(&nic_name, &link_message).await?;
