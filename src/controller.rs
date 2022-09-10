@@ -33,13 +33,13 @@ impl<R> Controller<R>
 where
     R: Reconcile + Send + Sync + 'static,
 {
-    pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
+    pub async fn start(&mut self, resync_interval: Duration) -> Result<(), Box<dyn Error>> {
         let reconciler = self.reconciler.clone();
         let client = self.client.clone();
         let api = Api::<Service>::all(client);
 
         RuntimeController::new(api, ListParams::default())
-            .reconcile_all_on(IntervalStream::new(Duration::from_secs(60 * 5)))
+            .reconcile_all_on(IntervalStream::new(resync_interval))
             .run(reconcile, error_policy, reconciler)
             .for_each(|_| future::ready(()))
             .await;

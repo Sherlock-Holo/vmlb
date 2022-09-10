@@ -23,6 +23,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     init_log();
 
+    info!(resync_interval = ?argument.resync_interval, "resync interval");
     info!(agent_addr = %argument.agent_addr, "connect to agent");
 
     let kube_client = Client::try_default().await?;
@@ -35,7 +36,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let reconciler = GrpcReconcile::new(channel, kube_client.clone());
     let mut controller = Controller::new(reconciler, kube_client);
 
-    controller.start().await
+    controller.start(argument.resync_interval).await
 }
 
 fn init_log() {
