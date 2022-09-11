@@ -443,9 +443,7 @@ async fn splice_copy(read_tcp_stream: &TcpStream, write_tcp_stream: &TcpStream) 
                 write_tcp_stream.as_raw_fd(),
                 None,
                 copy,
-                SpliceFFlags::SPLICE_F_MOVE
-                    | SpliceFFlags::SPLICE_F_NONBLOCK
-                    | SpliceFFlags::SPLICE_F_MORE,
+                SpliceFFlags::SPLICE_F_MOVE | SpliceFFlags::SPLICE_F_NONBLOCK,
             ) {
                 Err(err) if Error::from(err).kind() == ErrorKind::WouldBlock => {
                     match write_tcp_stream.try_write(&[]) {
