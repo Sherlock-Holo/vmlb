@@ -18,4 +18,8 @@ pub struct Argument {
     #[clap(short, long, default_value_t = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([0, 0, 0, 0]), 8599)))]
     /// grpc service listen addr
     pub listen_addr: SocketAddr,
+
+    #[clap(short, long, action)]
+    /// enable splice mode
+    pub splice_mode: bool,
 }

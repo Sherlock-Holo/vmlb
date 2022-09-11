@@ -14,7 +14,7 @@ use crate::addr_allocate::VethAddrAllocate;
 use crate::api::Api;
 use crate::argument::Argument;
 use crate::persistent::FsPersistent;
-use crate::proxy::{Network, UserspaceProxy};
+use crate::proxy::{EnumProxy, Network, SpliceProxy, UserspaceProxy};
 
 mod addr_allocate;
 mod api;
@@ -32,10 +32,20 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let addr_allocate = VethAddrAllocate::new(&argument.bridge).await?;
     let persistent = FsPersistent::new(argument.persistent_dir).await?;
-    let proxy = UserspaceProxy::new(
-        UDP_CONNECTION_TRACK_TIMEOUT,
-        UDP_CONNECTION_TRACK_CHECK_INTERVAL,
-    );
+
+    let proxy: EnumProxy = if argument.splice_mode {
+        SpliceProxy::new(
+            UDP_CONNECTION_TRACK_TIMEOUT,
+            UDP_CONNECTION_TRACK_CHECK_INTERVAL,
+        )
+        .into()
+    } else {
+        UserspaceProxy::new(
+            UDP_CONNECTION_TRACK_TIMEOUT,
+            UDP_CONNECTION_TRACK_CHECK_INTERVAL,
+        )
+        .into()
+    };
 
     let api = Api::new(addr_allocate, persistent, proxy);
     let api = pb::agent_server::AgentServer::new(api);

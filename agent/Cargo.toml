@@ -10,7 +10,7 @@ license = "MIT"
 build = "build.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "time", "net"] }
 tokio-stream = { version = "0.1", features = ["fs"] }
 bytes = "1"
 
